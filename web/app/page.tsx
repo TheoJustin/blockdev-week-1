@@ -2,8 +2,9 @@ import { ChatLab } from "@/components/chat-lab";
 
 const navItems = [
   { href: "#playground", label: "Playground" },
-  { href: "#attack-library", label: "Attacks" },
-  { href: "#why-it-breaks", label: "Why It Breaks" }
+  { href: "#mode-switch", label: "Modes" },
+  { href: "#scenario-lab", label: "Scenarios" },
+  { href: "#observability", label: "Logs" }
 ];
 
 export default function HomePage() {
@@ -36,29 +37,29 @@ export default function HomePage() {
         <div className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr] lg:items-end">
           <div className="space-y-6">
             <p className="text-sm uppercase tracking-[0.4em] text-cyan-300">
-              Intentionally Vulnerable by Design
+              Real OpenAI, App-Layer Guardrails
             </p>
             <div className="space-y-4">
               <h2 className="max-w-3xl font-serif text-5xl leading-tight text-white md:text-7xl">
-                Break the chatbot first. Then earn the fix.
+                One model. Three app behaviors. A much better demo.
               </h2>
               <p className="max-w-2xl text-lg leading-8 text-slate-300">
-                This first milestone recreates the exact failure mode you want on
-                camera: direct prompt injection, indirect document injection, and
-                tool-output hijacking that still get allowed into production.
+                Show that the provider already blocks the obvious jailbreak, then
+                prove why your own guardrails still matter when retrieval content,
+                tool output, and internal identifiers hit the application layer.
               </p>
             </div>
           </div>
-          <div className="rounded-[2rem] border border-rose-400/30 bg-white/5 p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_30px_80px_rgba(2,6,23,0.45)]">
-            <p className="text-sm uppercase tracking-[0.28em] text-rose-300">
-              Failure Conditions
+          <div className="rounded-[2rem] border border-cyan-300/25 bg-white/5 p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_30px_80px_rgba(2,6,23,0.45)]">
+            <p className="text-sm uppercase tracking-[0.28em] text-cyan-300">
+              Suggested Live Run
             </p>
             <ul className="mt-4 space-y-3 text-sm text-slate-200">
-              <li>No prompt isolation</li>
-              <li>No input guard</li>
-              <li>No output validation</li>
-              <li>Canary token included in the hidden prompt</li>
-              <li>High-risk requests are logged but never blocked</li>
+              <li>Start in Base OpenAI with the direct injection prompt.</li>
+              <li>Switch to Vulnerable App and run the retrieval or tool scenario.</li>
+              <li>Show the same model leaking app-sensitive details or unsafe actions.</li>
+              <li>Switch to Guarded App and replay the exact same scenario.</li>
+              <li>Use the logs panel to explain where provider safety ends.</li>
             </ul>
           </div>
         </div>
