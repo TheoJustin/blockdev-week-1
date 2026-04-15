@@ -8,7 +8,7 @@ function Badge({
   return (
     <div
       className={cn(
-        "inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium uppercase tracking-[0.2em]",
+        "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.24em]",
         className
       )}
       {...props}
