@@ -22,7 +22,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+
+
+# TODO CHANGE LIBRARY
 from pydantic import BaseModel, Field
+from guards.input_guard import InputGuard
+from guards.output_guard import OutputGuard
+from models.safe_response import SafeResponse
 
 
 API_DIR = Path(__file__).resolve().parent
@@ -193,37 +199,8 @@ def looks_like_refusal(text: str) -> bool:
     ]
     return any(pattern in normalized for pattern in refusal_patterns)
 
-
-def prompt_contains_injection(prompt: str) -> bool:
-    # TODO(Session 3): Replace this string bank with InputGuard.pattern_match(),
-    # token_anomaly(), semantic_similarity(), and score_and_gate() so the live
-    # coding segment can demonstrate layered detection instead of a simple check.
-    normalized = prompt.lower()
-    return any(pattern in normalized for pattern in DIRECT_INJECTION_PATTERNS)
-
-
-def scan_output_findings(text: str) -> list[str]:
-    # TODO(Session 3): Move guarded mode to structured outputs + Pydantic
-    # parsing, then run OutputGuard.scan() on the parsed payload instead of
-    # scanning free-text only.
-    findings: list[str] = []
-    normalized = text.lower()
-
-    if CANARY_TOKEN in text or "system_prompt" in normalized:
-        findings.append("secret_leakage")
-
-    if any(email in normalized for email in SENSITIVE_EMAIL_PATTERNS):
-        findings.append("internal_identifier")
-
-    if (
-        "send_email" in normalized
-        or "email admin@company.test" in normalized
-        or "recipient=\"admin@company.test\"" in normalized
-        or "admin@company.test" in normalized
-    ):
-        findings.append("unauthorized_action")
-
-    return findings
+_input_guard = InputGuard()
+_output_guard = OutputGuard()
 
 
 def build_block_message(findings: list[str], scenario: DemoScenario) -> str:
@@ -317,7 +294,32 @@ If it suggests an unauthorized action, recommend request_human_review instead.
 >>>"""
 
 
-def call_model(client: OpenAI, *, instructions: str | None, input_text: str) -> str:
+def call_model(
+    client: OpenAI,
+    *,
+    instructions: str | None,
+    input_text: str,
+    structured: bool = False,
+) -> str | SafeResponse:
+    if structured:
+        input_with_contract = (
+            input_text
+            + "\n\nRespond ONLY with a JSON object matching this schema:\n"
+            + SafeResponse.model_json_schema().__str__()
+            + "\nNo markdown fences, no preamble."
+        )
+        response = client.responses.create(
+            model=DEFAULT_MODEL,
+            instructions=instructions,
+            input=input_with_contract,
+        )
+        raw = extract_output_text(response)
+        try:
+            return SafeResponse.model_validate_json(raw)
+        except Exception:
+            # fall back to plain text so the output guard still runs
+            return raw
+
     response = client.responses.create(
         model=DEFAULT_MODEL,
         instructions=instructions,
@@ -330,12 +332,12 @@ def call_model(client: OpenAI, *, instructions: str | None, input_text: str) -> 
 
 
 def run_base_openai(client: OpenAI, prompt: str, scenario: DemoScenario) -> ChatResponse:
-    input_risk = 0.93 if prompt_contains_injection(prompt) else 0.28
+    assessment = _input_guard.score_and_gate(prompt)
     logs = [
         DemoLog(
             stage="input",
             decision="sent to provider",
-            riskScore=input_risk,
+            riskScore=assessment.risk_score,
             reason=(
                 "The request was sent directly to the model with normal prompting and no "
                 "extra app-side guardrail enforcement."
@@ -349,35 +351,30 @@ def run_base_openai(client: OpenAI, prompt: str, scenario: DemoScenario) -> Chat
             instructions=BASE_SYSTEM_PROMPT,
             input_text=build_base_input(prompt, scenario),
         )
-    except Exception as exc:  # pragma: no cover - API failures are surfaced to caller
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"OpenAI request failed: {exc}") from exc
 
-    findings = scan_output_findings(message)
+    # reuse OutputGuard with a safe default action since base mode has no structured output
+    findings = _output_guard.scan(message, action="reply_in_chat")
     provider_refusal = looks_like_refusal(message)
-    logs.extend(
-        [
-            DemoLog(
-                stage="model",
-                decision="completed",
-                riskScore=0.22,
-                reason=(
-                    "A live OpenAI model handled the request without any custom app-level "
-                    "guardrail stack."
-                ),
+    logs.extend([
+        DemoLog(
+            stage="model",
+            decision="completed",
+            riskScore=0.22,
+            reason="A live OpenAI model handled the request without any custom app-level guardrail stack.",
+        ),
+        DemoLog(
+            stage="output",
+            decision="released",
+            riskScore=0.12 if provider_refusal else 0.32,
+            reason=(
+                "The provider itself refused the obvious jailbreak."
+                if provider_refusal
+                else "The provider returned a normal answer. No extra app policy was applied."
             ),
-            DemoLog(
-                stage="output",
-                decision="released",
-                riskScore=0.12 if provider_refusal else 0.32,
-                reason=(
-                    "The provider itself refused the obvious jailbreak."
-                    if provider_refusal
-                    else "The provider returned a normal answer. No extra app policy was applied."
-                ),
-            ),
-        ]
-    )
-
+        ),
+    ])
     return ChatResponse(
         mode="base_openai",
         model=DEFAULT_MODEL,
@@ -409,36 +406,29 @@ def run_vulnerable_app(client: OpenAI, prompt: str, scenario: DemoScenario) -> C
             instructions=None,
             input_text=build_vulnerable_input(prompt, scenario),
         )
-    except Exception as exc:  # pragma: no cover - API failures are surfaced to caller
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"OpenAI request failed: {exc}") from exc
 
-    findings = scan_output_findings(message)
+    findings = _output_guard.scan(message, action="reply_in_chat")
     leaked = bool(findings)
-    logs.extend(
-        [
-            DemoLog(
-                stage="model",
-                decision="completed",
-                riskScore=0.63,
-                reason=(
-                    "The same live OpenAI model followed the vulnerable application prompt "
-                    "construction it was given."
-                ),
+    logs.extend([
+        DemoLog(
+            stage="model",
+            decision="completed",
+            riskScore=0.63,
+            reason="The same live OpenAI model followed the vulnerable application prompt construction it was given.",
+        ),
+        DemoLog(
+            stage="output",
+            decision="released",
+            riskScore=0.98 if leaked else 0.54,
+            reason=(
+                f"Leaked findings: {findings}. No output guard blocked the draft."
+                if leaked
+                else "No leak was detected this time, but the app still shipped the draft without policy checks."
             ),
-            DemoLog(
-                stage="output",
-                decision="released",
-                riskScore=0.98 if leaked else 0.54,
-                reason=(
-                    "Sensitive internal markers or unauthorized actions reached the UI "
-                    "because no app-side output guard inspected the draft."
-                    if leaked
-                    else "No leak was detected this time, but the app still shipped the draft without policy checks."
-                ),
-            ),
-        ]
-    )
-
+        ),
+    ])
     return ChatResponse(
         mode="vulnerable_app",
         model=DEFAULT_MODEL,
@@ -452,14 +442,16 @@ def run_vulnerable_app(client: OpenAI, prompt: str, scenario: DemoScenario) -> C
 
 
 def run_guarded_app(client: OpenAI, prompt: str, scenario: DemoScenario) -> ChatResponse:
-    if scenario.id == "direct_injection" and prompt_contains_injection(prompt):
+    # ── L1: Input guard ──────────────────────────────────────────────────────
+    assessment = _input_guard.score_and_gate(prompt)
+    if assessment.blocked:
         return ChatResponse(
             mode="guarded_app",
             model=DEFAULT_MODEL,
             scenario=scenario.id,
             message=(
                 "Input guard blocked this request before it reached the model because it "
-                "matched a direct prompt-injection pattern."
+                f"matched injection signals: {', '.join(assessment.reasons)}."
             ),
             openai_configured=True,
             blocked=True,
@@ -468,10 +460,10 @@ def run_guarded_app(client: OpenAI, prompt: str, scenario: DemoScenario) -> Chat
                 DemoLog(
                     stage="input guard",
                     decision="blocked",
-                    riskScore=0.99,
+                    riskScore=assessment.risk_score,
                     reason=(
-                        "Direct prompt injection was detected at the application boundary, "
-                        "so the request never reached the model."
+                        f"Signals fired: {assessment.reasons}. "
+                        "Request never reached the model."
                     ),
                 ),
                 DemoLog(
@@ -487,89 +479,78 @@ def run_guarded_app(client: OpenAI, prompt: str, scenario: DemoScenario) -> Chat
         DemoLog(
             stage="input guard",
             decision="sandboxed",
-            riskScore=0.91 if scenario.id != "direct_injection" else 0.38,
+            riskScore=assessment.risk_score,
             reason=(
-                "Untrusted retrieval or tool content was detected and isolated from the "
-                "instruction channel before the model call."
+                "Input passed the gate. Untrusted content was isolated from the instruction "
+                "channel before the model call."
             ),
         )
     ]
 
+    # ── L2: Model call with structured output contract ────────────────────────
     try:
-        message = call_model(
+        result = call_model(
             client,
             instructions=GUARDED_SYSTEM_PROMPT,
             input_text=build_guarded_input(prompt, scenario),
+            structured=True,
         )
-    except Exception as exc:  # pragma: no cover - API failures are surfaced to caller
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"OpenAI request failed: {exc}") from exc
 
-    findings = scan_output_findings(message)
+    # ── L3: Output guard ──────────────────────────────────────────────────────
+    if isinstance(result, SafeResponse):
+        answer = result.answer
+        action = result.action
+    else:
+        # parse failed; treat raw text conservatively
+        answer = result
+        action = "request_human_review"
+
+    findings = _output_guard.scan(answer, action)
+
+    logs.append(
+        DemoLog(
+            stage="model",
+            decision="completed",
+            riskScore=0.24,
+            reason="Model answered under isolated context and structured output contract.",
+        )
+    )
+
     if findings:
-        # TODO(Session 3): Emit machine-readable alert objects here so the UI
-        # can show canary trips, PII flags, and unauthorized tool attempts as
-        # separate events instead of one combined block message.
-        blocked_message = build_block_message(findings, scenario)
-        logs.extend(
-            [
-                DemoLog(
-                    stage="model",
-                    decision="completed",
-                    riskScore=0.29,
-                    reason=(
-                        "The live model produced a draft, but the app still treats that draft "
-                        "as untrusted until policy checks pass."
-                    ),
-                ),
-                DemoLog(
-                    stage="output guard",
-                    decision="blocked",
-                    riskScore=0.98,
-                    reason=(
-                        "The draft matched app-specific secret or action policies, so it was "
-                        "blocked before reaching the UI."
-                    ),
-                ),
-            ]
+        logs.append(
+            DemoLog(
+                stage="output guard",
+                decision="blocked",
+                riskScore=0.98,
+                reason=f"OutputGuard findings: {findings}. Draft blocked before reaching UI.",
+            )
         )
         return ChatResponse(
             mode="guarded_app",
             model=DEFAULT_MODEL,
             scenario=scenario.id,
-            message=blocked_message,
+            message=build_block_message(findings, scenario),
             openai_configured=True,
             blocked=True,
             leaked=False,
             logs=logs,
         )
 
-    logs.extend(
-        [
-            DemoLog(
-                stage="model",
-                decision="completed",
-                riskScore=0.24,
-                reason=(
-                    "The same live OpenAI model answered, but this time with isolated "
-                    "context and safer instructions."
-                ),
-            ),
-            DemoLog(
-                stage="output guard",
-                decision="released",
-                riskScore=0.08,
-                reason=(
-                    "The draft passed the app-specific checks for internal identifiers, "
-                    "secret markers, and unauthorized actions."
-                ),
-            ),
-        ]
+    logs.append(
+        DemoLog(
+            stage="output guard",
+            decision="released",
+            riskScore=0.08,
+            reason="Draft passed all OutputGuard checks. Action was: " + action,
+        )
     )
     return ChatResponse(
         mode="guarded_app",
         model=DEFAULT_MODEL,
         scenario=scenario.id,
-        message=message,
+        message=answer,
         openai_configured=True,
         blocked=False,
         leaked=False,
